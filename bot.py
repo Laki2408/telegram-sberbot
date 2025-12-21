@@ -1,13 +1,15 @@
 # ================================
-# TELEGRAM BOT: АНАЛИЗ ЧАТА (KOYEB VERSION)
+# TELEGRAM BOT: АНАЛИЗ ЧАТА (KOYEB WEBHOOK)
 # ================================
 
 import os
-import threading
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from collections import defaultdict
+from datetime import datetime, timedelta
 
+from fastapi import FastAPI, Request
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
+    Application,
     ApplicationBuilder,
     MessageHandler,
     CommandHandler,
@@ -15,28 +17,26 @@ from telegram.ext import (
     ContextTypes,
     filters,
 )
-from collections import defaultdict
-from datetime import datetime, timedelta
 
 # ───────────── ENV ─────────────
 TOKEN = os.getenv("TOKEN")
 PORT = int(os.getenv("PORT", 8000))
+DOMAIN = os.getenv("KOYEB_PUBLIC_DOMAIN")
+
+if not TOKEN or not DOMAIN:
+    raise RuntimeError("TOKEN or KOYEB_PUBLIC_DOMAIN is missing")
+
+WEBHOOK_PATH = f"/webhook/{TOKEN}"
+WEBHOOK_URL = f"https://{DOMAIN}{WEBHOOK_PATH}"
 
 # ───────────── ХРАНИЛИЩА ─────────────
 message_stats = defaultdict(lambda: defaultdict(lambda: defaultdict(int)))
 message_texts = defaultdict(lambda: defaultdict(list))
 user_names = {}
 
-# ───────────── HTTP SERVER (для Koyeb) ─────────────
-class HealthHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200)
-        self.end_headers()
-        self.wfile.write(b"OK")
-
-def run_http():
-    server = HTTPServer(("0.0.0.0", PORT), HealthHandler)
-    server.serve_forever()
+# ───────────── FASTAPI ─────────────
+app = FastAPI()
+telegram_app: Application = ApplicationBuilder().token(TOKEN).build()
 
 # ───────────── МЕНЮ ─────────────
 def menu_keyboard():
@@ -111,7 +111,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     state = context.user_data.get("await")
 
-    # ── ПЕРИОД ──
     if state == "period":
         try:
             start_d, end_d = text.split()
@@ -140,7 +139,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data.clear()
         await update.message.reply_text("Выберите действие:", reply_markup=menu_keyboard())
 
-    # ── ПОИСК ──
     elif state == "search":
         q = text.lower()
         total = defaultdict(int)
@@ -162,14 +160,18 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data.clear()
         await update.message.reply_text("Выберите действие:", reply_markup=menu_keyboard())
 
-# ───────────── ЗАПУСК ─────────────
-if __name__ == "__main__":
-    threading.Thread(target=run_http, daemon=True).start()
+# ───────────── WEBHOOK ─────────────
+@app.on_event("startup")
+async def startup():
+    telegram_app.add_handler(CommandHandler("start", start))
+    telegram_app.add_handler(CallbackQueryHandler(menu_callback))
+    telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
+    await telegram_app.bot.set_webhook(WEBHOOK_URL)
+    print("Webhook set:", WEBHOOK_URL)
 
-    app = ApplicationBuilder().token(TOKEN).build()
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CallbackQueryHandler(menu_callback))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
-
-    print("Bot is running...")
-    app.run_polling()
+@app.post(WEBHOOK_PATH)
+async def webhook(request: Request):
+    data = await request.json()
+    update = Update.de_json(data, telegram_app.bot)
+    await telegram_app.process_update(update)
+    return {"ok": True}
