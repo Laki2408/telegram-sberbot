@@ -1,6 +1,10 @@
 # ================================
-# TELEGRAM BOT: АНАЛИЗ ЧАТА (НОВАЯ ВЕРСИЯ)
+# TELEGRAM BOT: АНАЛИЗ ЧАТА (KOYEB VERSION)
 # ================================
+
+import os
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -14,13 +18,25 @@ from telegram.ext import (
 from collections import defaultdict
 from datetime import datetime, timedelta
 
-TOKEN = "8112024839:AAGCNNqoYGKAp87lw0hvnhlwIIbKB3dLZRc"
+# ───────────── ENV ─────────────
+TOKEN = os.getenv("TOKEN")
+PORT = int(os.getenv("PORT", 8000))
 
-# Хранилища
+# ───────────── ХРАНИЛИЩА ─────────────
 message_stats = defaultdict(lambda: defaultdict(lambda: defaultdict(int)))
 message_texts = defaultdict(lambda: defaultdict(list))
 user_names = {}
 
+# ───────────── HTTP SERVER (для Koyeb) ─────────────
+class HealthHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"OK")
+
+def run_http():
+    server = HTTPServer(("0.0.0.0", PORT), HealthHandler)
+    server.serve_forever()
 
 # ───────────── МЕНЮ ─────────────
 def menu_keyboard():
@@ -31,14 +47,12 @@ def menu_keyboard():
         [InlineKeyboardButton("#️⃣ Поиск по хештегу", callback_data="search_tag")],
     ])
 
-
 # ───────────── СТАРТ ─────────────
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.clear()
     await update.message.reply_text("Выберите действие:", reply_markup=menu_keyboard())
 
-
-# ───────────── ОБРАБОТКА КНОПОК ─────────────
+# ───────────── КНОПКИ ─────────────
 async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -62,8 +76,7 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data["mode"] = "tag"
         await query.message.reply_text("Введите хештег")
 
-
-# ───────────── СТАТИСТИКА СЕГОДНЯ ─────────────
+# ───────────── СЕГОДНЯ ─────────────
 async def show_today(query):
     chat_id = query.message.chat_id
     today = datetime.utcnow().strftime("%Y-%m-%d")
@@ -79,24 +92,19 @@ async def show_today(query):
 
     await query.message.reply_text("\n".join(lines))
 
-
-# ───────────── ОБРАБОТКА ТЕКСТА ─────────────
+# ───────────── ТЕКСТ ─────────────
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or update.message.from_user.is_bot:
         return
 
     text = update.message.text
-
-    # 🚫 Не считаем команды как текстовые сообщения
     if text.startswith("/"):
         return
 
     chat_id = update.message.chat_id
     user = update.message.from_user
     date_str = update.message.date.strftime("%Y-%m-%d")
-    display_date = update.message.date.strftime("%d-%m-%Y")
 
-    # сохраняем сообщение
     user_names[user.id] = user.full_name
     message_stats[chat_id][date_str][user.id] += 1
     message_texts[chat_id][date_str].append((user.id, text.lower()))
@@ -110,19 +118,19 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             start = datetime.strptime(start_d, "%d-%m-%Y")
             end = datetime.strptime(end_d, "%d-%m-%Y")
         except:
-            await update.message.reply_text("❌ Неверный формат.\nПример: 01-12-2025 10-12-2025")
+            await update.message.reply_text("❌ Формат: 01-12-2025 10-12-2025")
             return
 
         result = defaultdict(int)
         cur = start
         while cur <= end:
-            day_key = cur.strftime("%Y-%m-%d")
-            for uid, cnt in message_stats.get(chat_id, {}).get(day_key, {}).items():
+            key = cur.strftime("%Y-%m-%d")
+            for uid, cnt in message_stats.get(chat_id, {}).get(key, {}).items():
                 result[uid] += cnt
             cur += timedelta(days=1)
 
         if not result:
-            await update.message.reply_text("Нет данных за этот период")
+            await update.message.reply_text("Нет данных за период")
         else:
             lines = [f"📆 Статистика с {start_d} по {end_d}:\n"]
             for uid, cnt in sorted(result.items(), key=lambda x: x[1], reverse=True):
@@ -131,23 +139,22 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         context.user_data.clear()
         await update.message.reply_text("Выберите действие:", reply_markup=menu_keyboard())
-        return
 
     # ── ПОИСК ──
     elif state == "search":
-        query = text.lower()
+        q = text.lower()
         total = defaultdict(int)
 
-        for day_data in message_texts.get(chat_id, {}).values():
-            for uid, msg in day_data:
-                if query in msg:
+        for day in message_texts.get(chat_id, {}).values():
+            for uid, msg in day:
+                if q in msg:
                     total[uid] += 1
 
         if not total:
-            await update.message.reply_text(f"Совпадений с '{query}' не найдено")
+            await update.message.reply_text(f"Совпадений с '{q}' не найдено")
         else:
             icon = "🔍" if context.user_data.get("mode") == "word" else "#️⃣"
-            lines = [f"{icon} Найдено сообщений с '{query}':\n"]
+            lines = [f"{icon} Найдено сообщений с '{q}':\n"]
             for uid, cnt in sorted(total.items(), key=lambda x: x[1], reverse=True):
                 lines.append(f"{user_names.get(uid, 'Неизвестный')}: {cnt}")
             await update.message.reply_text("\n".join(lines))
@@ -155,11 +162,11 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data.clear()
         await update.message.reply_text("Выберите действие:", reply_markup=menu_keyboard())
 
-
 # ───────────── ЗАПУСК ─────────────
 if __name__ == "__main__":
-    app = ApplicationBuilder().token(TOKEN).build()
+    threading.Thread(target=run_http, daemon=True).start()
 
+    app = ApplicationBuilder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(menu_callback))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
