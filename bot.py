@@ -169,6 +169,9 @@ async def startup():
     telegram_app.add_handler(CallbackQueryHandler(menu_callback))
     telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
+    # ───── Инициализация приложения ─────
+    await telegram_app.initialize()
+
     try:
         await telegram_app.bot.set_webhook(
             WEBHOOK_URL,
