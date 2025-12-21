@@ -3,11 +3,13 @@
 # ================================
 
 import os
+import asyncio
 from collections import defaultdict
 from datetime import datetime, timedelta
 
 from fastapi import FastAPI, Request
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.error import RetryAfter
 from telegram.ext import (
     Application,
     ApplicationBuilder,
@@ -166,8 +168,17 @@ async def startup():
     telegram_app.add_handler(CommandHandler("start", start))
     telegram_app.add_handler(CallbackQueryHandler(menu_callback))
     telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
-    await telegram_app.bot.set_webhook(WEBHOOK_URL)
-    print("Webhook set:", WEBHOOK_URL)
+
+    try:
+        await telegram_app.bot.set_webhook(
+            WEBHOOK_URL,
+            drop_pending_updates=True
+        )
+        print("Webhook set:", WEBHOOK_URL)
+
+    except RetryAfter as e:
+        print(f"Webhook flood control, retry after {e.retry_after}s")
+        await asyncio.sleep(e.retry_after)
 
 @app.post(WEBHOOK_PATH)
 async def webhook(request: Request):
