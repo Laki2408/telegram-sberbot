@@ -2,6 +2,7 @@ import os
 from collections import defaultdict
 from datetime import datetime
 
+from fastapi import FastAPI, Request
 from telegram import (
     Update,
     InlineKeyboardMarkup,
@@ -20,17 +21,22 @@ from telegram.ext import (
 )
 
 # ================================
-# CONFIG (ENV + WEBHOOK)
+# CONFIG
 # ================================
 TOKEN = os.getenv("TOKEN")
 DOMAIN = os.getenv("KOYEB_PUBLIC_DOMAIN")
-PORT = int(os.getenv("PORT", 8080))
+PORT = int(os.getenv("PORT", 8000))
 
 if not TOKEN or not DOMAIN:
     raise RuntimeError("TOKEN or KOYEB_PUBLIC_DOMAIN is missing")
 
 WEBHOOK_PATH = f"/webhook/{TOKEN}"
 WEBHOOK_URL = f"https://{DOMAIN}{WEBHOOK_PATH}"
+
+# ================================
+# FASTAPI APP (ASGI)
+# ================================
+app = FastAPI()
 
 # ================================
 # STORAGE (RAM)
@@ -80,7 +86,7 @@ def normalize(word: str) -> str:
 
 
 # ================================
-# /start
+# BOT HANDLERS
 # ================================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type != "private":
@@ -97,9 +103,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
-# ================================
-# /refresh
-# ================================
 async def refresh(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type != "private":
         return
@@ -124,9 +127,6 @@ async def refresh(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
-# ================================
-# CALLBACKS
-# ================================
 async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -184,13 +184,10 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data["mode"] = "words_all" if action == "set_period" else action
         context.user_data["step"] = "period"
         await query.message.reply_text(
-            "Введите период для статистики:\nДД-ММ-ГГГГ ДД-ММ-ГГГГ"
+            "Введите период:\nДД-ММ-ГГГГ ДД-ММ-ГГГГ"
         )
 
 
-# ================================
-# INPUT FSM
-# ================================
 async def input_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type != "private":
         return
@@ -208,7 +205,7 @@ async def input_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             start, end = parse_period(text)
         except:
-            await update.message.reply_text("❌ Неверный формат периода")
+            await update.message.reply_text("❌ Неверный формат")
             return
 
         context.user_data["period"] = (start, end)
@@ -236,9 +233,6 @@ async def input_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data.clear()
 
 
-# ================================
-# WORD STATS
-# ================================
 async def show_word_stats(update, chat_id, start, end, word=None, tag=None):
     counter = defaultdict(int)
     total = 0
@@ -269,9 +263,6 @@ async def show_word_stats(update, chat_id, start, end, word=None, tag=None):
     await update.message.reply_text("\n".join(lines))
 
 
-# ================================
-# GROUP COLLECTOR
-# ================================
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or update.message.from_user.is_bot:
         return
@@ -292,27 +283,34 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ================================
-# MAIN (WEB SERVICE)
+# TELEGRAM APP INIT
 # ================================
-def main():
-    app: Application = ApplicationBuilder().token(TOKEN).build()
+tg_app: Application = ApplicationBuilder().token(TOKEN).build()
 
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("refresh", refresh))
-    app.add_handler(CallbackQueryHandler(menu_callback))
-    app.add_handler(MessageHandler(filters.TEXT & filters.ChatType.PRIVATE, input_handler))
-    app.add_handler(MessageHandler(filters.TEXT, handle_text))
-
-    app.run_webhook(
-        listen="0.0.0.0",
-        port=PORT,
-        url_path=WEBHOOK_PATH,
-        webhook_url=WEBHOOK_URL,
-    )
-
-    print("🌍 Web-service started")
-    print("🔗 Webhook:", WEBHOOK_URL)
+tg_app.add_handler(CommandHandler("start", start))
+tg_app.add_handler(CommandHandler("refresh", refresh))
+tg_app.add_handler(CallbackQueryHandler(menu_callback))
+tg_app.add_handler(MessageHandler(filters.TEXT & filters.ChatType.PRIVATE, input_handler))
+tg_app.add_handler(MessageHandler(filters.TEXT, handle_text))
 
 
-if __name__ == "__main__":
-    main()
+# ================================
+# FASTAPI LIFECYCLE
+# ================================
+@app.on_event("startup")
+async def on_startup():
+    await tg_app.initialize()
+    await tg_app.bot.set_webhook(WEBHOOK_URL)
+
+
+@app.on_event("shutdown")
+async def on_shutdown():
+    await tg_app.shutdown()
+
+
+@app.post(WEBHOOK_PATH)
+async def telegram_webhook(request: Request):
+    data = await request.json()
+    update = Update.de_json(data, tg_app.bot)
+    await tg_app.process_update(update)
+    return {"ok": True}
