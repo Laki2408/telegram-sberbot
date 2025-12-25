@@ -1,8 +1,6 @@
 import os
 import asyncio
 from collections import defaultdict
-from datetime import datetime
-
 from fastapi import FastAPI, Request
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ChatMemberAdministrator, ChatMemberOwner
 from telegram.error import RetryAfter
@@ -118,7 +116,7 @@ async def input_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
     if step == "period":
         try:
-            start, end = [datetime.strptime(d, "%d-%m-%Y") for d in text.split()]
+            start, end = text.split()
         except:
             await update.message.reply_text("❌ Неверный формат")
             return
@@ -141,12 +139,11 @@ async def input_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await show_word_stats(update, chat_id, start, end, tag=value)
         context.user_data.clear()
 
-async def show_word_stats(update, chat_id, start, end, word=None, tag=None):
+async def show_word_stats(update, chat_id, start_str, end_str, word=None, tag=None):
     counter = defaultdict(int)
     total = 0
     for date_str, msgs in message_texts.get(chat_id, {}).items():
-        date = datetime.strptime(date_str, "%d-%m-%Y")
-        if not (start.date() <= date.date() <= end.date()):
+        if not (start_str <= date_str <= end_str):
             continue
         for uid, text in msgs:
             for w in text.split():
