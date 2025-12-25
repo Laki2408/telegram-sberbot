@@ -1,10 +1,10 @@
 import os
 import asyncio
 from collections import defaultdict
-from datetime import datetime, timedelta
+from datetime import datetime
 
 from fastapi import FastAPI, Request
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ChatMemberAdministrator, ChatMemberOwner
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ChatMemberAdministrator, ChatMemberOwner, ChatMember
 from telegram.error import RetryAfter
 from telegram.ext import (
     Application,
@@ -14,6 +14,7 @@ from telegram.ext import (
     CallbackQueryHandler,
     ContextTypes,
     filters,
+    ChatMemberHandler
 )
 
 TOKEN = os.getenv("TOKEN")
@@ -178,10 +179,17 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if update.message.text:
             message_texts[chat.id][date_str].append((user.id, update.message.text.lower()))
 
+async def track_new_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Добавляем чат в known_chats сразу при присоединении бота"""
+    chat = update.effective_chat
+    if chat.type in ("group", "supergroup"):
+        known_chats[chat.id] = chat.title
+
 telegram_app.add_handler(CommandHandler("start", start))
 telegram_app.add_handler(CallbackQueryHandler(menu_callback))
 telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, input_handler))
 telegram_app.add_handler(MessageHandler(filters.TEXT, handle_text))
+telegram_app.add_handler(ChatMemberHandler(track_new_chat, ChatMemberHandler.MY_CHAT_MEMBER))
 
 @app.on_event("startup")
 async def startup():
