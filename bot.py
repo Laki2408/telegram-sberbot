@@ -26,6 +26,8 @@ from telegram.ext import (
 TOKEN = os.getenv("TOKEN")
 DOMAIN = os.getenv("KOYEB_PUBLIC_DOMAIN")
 PORT = int(os.getenv("PORT", 8000))
+KOYEB_PUBLIC_DOMAIN=planned-squid-daria1-fede40ad.koyeb.app
+
 
 if not TOKEN or not DOMAIN:
     raise RuntimeError("TOKEN or KOYEB_PUBLIC_DOMAIN is missing")
@@ -314,3 +316,4 @@ async def telegram_webhook(request: Request):
     update = Update.de_json(data, tg_app.bot)
     await tg_app.process_update(update)
     return {"ok": True}
+
