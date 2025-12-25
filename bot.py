@@ -91,8 +91,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type != "private":
         return
 
+    # Logging to check if the bot has added any chats
     if not known_chats:
         await update.message.reply_text("Я ещё не добавлен ни в один чат.")
+        print("No chats found. Bot hasn't been added to any chats yet.")
         return
 
     context.user_data.clear()
@@ -111,8 +113,8 @@ async def refresh(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             await context.bot.get_chat(chat_id)
             valid_chats[chat_id] = title
-        except:
-            pass
+        except Exception as e:
+            print(f"Error checking chat {chat_id}: {e}")
 
     known_chats.clear()
     known_chats.update(valid_chats)
@@ -274,49 +276,9 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         known_chats[chat.id] = chat.title
         date_str = update.message.date.strftime("%d-%m-%Y")
         user_names[user.id] = user.full_name
-        message_stats[chat.id][date_str][user.id] += 1
+message_stats[chat.id][date_str][user.id] += 1
+    if update.message.text:
+        message_texts[chat.id][date_str].append(
+            (user.id, update.message.text.lower())
+        )
 
-        if update.message.text:
-            message_texts[chat.id][date_str].append(
-                (user.id, update.message.text.lower())
-            )
-
-# ================================
-# TELEGRAM APP INIT
-# ================================
-tg_app: Application = ApplicationBuilder().token(TOKEN).build()
-
-tg_app.add_handler(CommandHandler("start", start))
-tg_app.add_handler(CommandHandler("refresh", refresh))
-tg_app.add_handler(CallbackQueryHandler(menu_callback))
-tg_app.add_handler(MessageHandler(filters.TEXT & filters.ChatType.PRIVATE, input_handler))
-tg_app.add_handler(MessageHandler(filters.TEXT, handle_text))
-
-# ================================
-# FASTAPI LIFECYCLE
-# ================================
-@app.on_event("startup")
-async def on_startup():
-    await tg_app.initialize()
-    await tg_app.start()
-    await tg_app.bot.set_webhook(WEBHOOK_URL)
-    print("Webhook set:", WEBHOOK_URL)
-
-
-@app.on_event("shutdown")
-async def on_shutdown():
-    await tg_app.stop()
-    await tg_app.shutdown()
-
-
-@app.post(WEBHOOK_PATH)
-async def telegram_webhook(request: Request):
-    data = await request.json()
-    update = Update.de_json(data, tg_app.bot)
-    await tg_app.process_update(update)
-    return {"ok": True}
-
-
-@app.get("/")
-async def root():
-    return {"status": "ok"}
