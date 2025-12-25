@@ -276,9 +276,12 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         known_chats[chat.id] = chat.title
         date_str = update.message.date.strftime("%d-%m-%Y")
         user_names[user.id] = user.full_name
-message_stats[chat.id][date_str][user.id] += 1
-    if update.message.text:
-        message_texts[chat.id][date_str].append(
-            (user.id, update.message.text.lower())
-        )
+        message_stats[chat.id][date_str][user.id] += 1
+
+        if update.message.text:
+            message_texts[chat.id][date_str].append(
+                (user.id, update.message.text.lower())
+            )
+
+
 
