@@ -26,8 +26,6 @@ from telegram.ext import (
 TOKEN = os.getenv("TOKEN")
 DOMAIN = os.getenv("KOYEB_PUBLIC_DOMAIN")
 PORT = int(os.getenv("PORT", 8000))
-KOYEB_PUBLIC_DOMAIN=planned-squid-daria1-fede40ad.koyeb.app
-
 
 if not TOKEN or not DOMAIN:
     raise RuntimeError("TOKEN or KOYEB_PUBLIC_DOMAIN is missing")
@@ -86,7 +84,6 @@ def parse_period(text: str):
 def normalize(word: str) -> str:
     return word.strip(".,!?()[]{}:;\"'").lower()
 
-
 # ================================
 # BOT HANDLERS
 # ================================
@@ -109,15 +106,18 @@ async def refresh(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type != "private":
         return
 
-    chats = []
-    for chat_id in list(known_chats.keys()):
+    valid_chats = {}
+    for chat_id, title in known_chats.items():
         try:
             await context.bot.get_chat(chat_id)
-            chats.append(chat_id)
+            valid_chats[chat_id] = title
         except:
-            known_chats.pop(chat_id, None)
+            pass
 
-    if not chats:
+    known_chats.clear()
+    known_chats.update(valid_chats)
+
+    if not known_chats:
         await update.message.reply_text(
             "❗ Напиши любое сообщение в группе, где есть бот, чтобы обновить список чатов."
         )
@@ -185,9 +185,7 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif action in ("set_period", "words_all", "words_word", "words_tag"):
         context.user_data["mode"] = "words_all" if action == "set_period" else action
         context.user_data["step"] = "period"
-        await query.message.reply_text(
-            "Введите период:\nДД-ММ-ГГГГ ДД-ММ-ГГГГ"
-        )
+        await query.message.reply_text("Введите период:\nДД-ММ-ГГГГ ДД-ММ-ГГГГ")
 
 
 async def input_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -283,7 +281,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 (user.id, update.message.text.lower())
             )
 
-
 # ================================
 # TELEGRAM APP INIT
 # ================================
@@ -295,18 +292,20 @@ tg_app.add_handler(CallbackQueryHandler(menu_callback))
 tg_app.add_handler(MessageHandler(filters.TEXT & filters.ChatType.PRIVATE, input_handler))
 tg_app.add_handler(MessageHandler(filters.TEXT, handle_text))
 
-
 # ================================
 # FASTAPI LIFECYCLE
 # ================================
 @app.on_event("startup")
 async def on_startup():
     await tg_app.initialize()
+    await tg_app.start()
     await tg_app.bot.set_webhook(WEBHOOK_URL)
+    print("Webhook set:", WEBHOOK_URL)
 
 
 @app.on_event("shutdown")
 async def on_shutdown():
+    await tg_app.stop()
     await tg_app.shutdown()
 
 
@@ -317,3 +316,7 @@ async def telegram_webhook(request: Request):
     await tg_app.process_update(update)
     return {"ok": True}
 
+
+@app.get("/")
+async def root():
+    return {"status": "ok"}
