@@ -1,29 +1,24 @@
 import os
+import asyncio
 from collections import defaultdict
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from fastapi import FastAPI, Request
-from telegram import (
-    Update,
-    InlineKeyboardMarkup,
-    InlineKeyboardButton,
-    ChatMemberAdministrator,
-    ChatMemberOwner,
-)
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ChatMemberAdministrator, ChatMemberOwner
+from telegram.error import RetryAfter
 from telegram.ext import (
     Application,
     ApplicationBuilder,
+    MessageHandler,
     CommandHandler,
     CallbackQueryHandler,
-    MessageHandler,
     ContextTypes,
     filters,
 )
-from telegram.error import RetryAfter
 
 TOKEN = os.getenv("TOKEN")
-DOMAIN = os.getenv("KOYEB_PUBLIC_DOMAIN")
 PORT = int(os.getenv("PORT", 8000))
+DOMAIN = os.getenv("KOYEB_PUBLIC_DOMAIN")
 
 if not TOKEN or not DOMAIN:
     raise RuntimeError("TOKEN or KOYEB_PUBLIC_DOMAIN is missing")
@@ -31,16 +26,13 @@ if not TOKEN or not DOMAIN:
 WEBHOOK_PATH = f"/webhook/{TOKEN}"
 WEBHOOK_URL = f"https://{DOMAIN}{WEBHOOK_PATH}"
 
-app = FastAPI()
-
 message_stats = defaultdict(lambda: defaultdict(lambda: defaultdict(int)))
 message_texts = defaultdict(lambda: defaultdict(list))
 user_names = {}
 known_chats = {}
 
-async def is_admin(bot, chat_id, user_id) -> bool:
-    member = await bot.get_chat_member(chat_id, user_id)
-    return isinstance(member, (ChatMemberAdministrator, ChatMemberOwner))
+app = FastAPI()
+telegram_app: Application = ApplicationBuilder().token(TOKEN).build()
 
 def chat_menu(chat_id: int):
     return InlineKeyboardMarkup([
@@ -59,15 +51,12 @@ def chat_select_keyboard():
         for cid, title in known_chats.items()
     ])
 
-def parse_period(text: str):
-    start, end = text.split()
-    return (
-        datetime.strptime(start, "%d-%m-%Y"),
-        datetime.strptime(end, "%d-%m-%Y"),
-    )
-
 def normalize(word: str) -> str:
     return word.strip(".,!?()[]{}:;\"'").lower()
+
+async def is_admin(bot, chat_id, user_id) -> bool:
+    member = await bot.get_chat_member(chat_id, user_id)
+    return isinstance(member, (ChatMemberAdministrator, ChatMemberOwner))
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type != "private":
@@ -76,42 +65,14 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Я ещё не добавлен ни в один чат.")
         return
     context.user_data.clear()
-    await update.message.reply_text(
-        "Выберите чат:",
-        reply_markup=chat_select_keyboard()
-    )
-
-async def refresh(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_chat.type != "private":
-        return
-    valid_chats = {}
-    for chat_id, title in known_chats.items():
-        try:
-            await context.bot.get_chat(chat_id)
-            valid_chats[chat_id] = title
-        except:
-            pass
-    known_chats.clear()
-    known_chats.update(valid_chats)
-    if not known_chats:
-        await update.message.reply_text(
-            "❗ Напиши любое сообщение в группе, где есть бот, чтобы обновить список чатов."
-        )
-        return
-    await update.message.reply_text(
-        "Список чатов обновлён",
-        reply_markup=chat_select_keyboard()
-    )
+    await update.message.reply_text("Выберите чат:", reply_markup=chat_select_keyboard())
 
 async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     if query.data == "change_chat":
         context.user_data.clear()
-        await query.message.reply_text(
-            "Выберите чат:",
-            reply_markup=chat_select_keyboard()
-        )
+        await query.message.reply_text("Выберите чат:", reply_markup=chat_select_keyboard())
         return
     action, chat_id = query.data.split(":")
     chat_id = int(chat_id)
@@ -120,10 +81,7 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.message.reply_text("⛔ Только для администраторов")
         return
     if action == "select":
-        await query.message.reply_text(
-            f"Управление чатом: {known_chats.get(chat_id)}",
-            reply_markup=chat_menu(chat_id)
-        )
+        await query.message.reply_text(f"Управление чатом: {known_chats.get(chat_id)}", reply_markup=chat_menu(chat_id))
     elif action == "info":
         stats = message_stats.get(chat_id, {})
         users = set()
@@ -132,11 +90,7 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             for uid, cnt in day.items():
                 users.add(uid)
                 total += cnt
-        await query.message.reply_text(
-            f"ℹ️ Чат: {known_chats.get(chat_id)}\n"
-            f"👥 Активных участников: {len(users)}\n"
-            f"💬 Сообщений всего: {total}"
-        )
+        await query.message.reply_text(f"ℹ️ Чат: {known_chats.get(chat_id)}\n👥 Активных участников: {len(users)}\n💬 Сообщений всего: {total}")
     elif action == "today":
         today = datetime.utcnow().strftime("%d-%m-%Y")
         stats = message_stats.get(chat_id, {}).get(today, {})
@@ -163,7 +117,7 @@ async def input_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
     if step == "period":
         try:
-            start, end = parse_period(text)
+            start, end = [datetime.strptime(d, "%d-%m-%Y") for d in text.split()]
         except:
             await update.message.reply_text("❌ Неверный формат")
             return
@@ -194,11 +148,11 @@ async def show_word_stats(update, chat_id, start, end, word=None, tag=None):
         if not (start <= date <= end):
             continue
         for uid, text in msgs:
-            for raw in text.split():
-                w = normalize(raw)
-                if word and w != word:
+            for w in text.split():
+                w_norm = normalize(w)
+                if word and w_norm != word:
                     continue
-                if tag and w != tag:
+                if tag and w_norm != tag:
                     continue
                 counter[uid] += 1
                 total += 1
@@ -222,41 +176,32 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_names[user.id] = user.full_name
         message_stats[chat.id][date_str][user.id] += 1
         if update.message.text:
-            message_texts[chat.id][date_str].append(
-                (user.id, update.message.text.lower())
-            )
+            message_texts[chat.id][date_str].append((user.id, update.message.text.lower()))
 
-tg_app: Application = ApplicationBuilder().token(TOKEN).build()
-tg_app.add_handler(CommandHandler("start", start))
-tg_app.add_handler(CommandHandler("refresh", refresh))
-tg_app.add_handler(CallbackQueryHandler(menu_callback))
-tg_app.add_handler(MessageHandler(filters.TEXT & filters.ChatType.PRIVATE, input_handler))
-tg_app.add_handler(MessageHandler(filters.TEXT, handle_text))
+telegram_app.add_handler(CommandHandler("start", start))
+telegram_app.add_handler(CallbackQueryHandler(menu_callback))
+telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, input_handler))
+telegram_app.add_handler(MessageHandler(filters.TEXT, handle_text))
 
 @app.on_event("startup")
-async def on_startup():
-    await tg_app.initialize()
-    await tg_app.start()
+async def startup():
+    await telegram_app.initialize()
     try:
-        current = await tg_app.bot.get_webhook_info()
+        current = await telegram_app.bot.get_webhook_info()
         if current.url != WEBHOOK_URL:
-            await tg_app.bot.set_webhook(WEBHOOK_URL)
-        print(f"Webhook set: {WEBHOOK_URL}")
+            await telegram_app.bot.set_webhook(WEBHOOK_URL, drop_pending_updates=True)
+        print("Webhook set:", WEBHOOK_URL)
     except RetryAfter as e:
-        print(f"RetryAfter: try again in {e.retry_after} seconds")
+        print(f"Webhook flood control, retry after {e.retry_after}s")
+        await asyncio.sleep(e.retry_after)
     except Exception as e:
         print(f"Error in startup: {e}")
 
-@app.on_event("shutdown")
-async def on_shutdown():
-    await tg_app.stop()
-    await tg_app.shutdown()
-
 @app.post(WEBHOOK_PATH)
-async def telegram_webhook(request: Request):
+async def webhook(request: Request):
     data = await request.json()
-    update = Update.de_json(data, tg_app.bot)
-    await tg_app.process_update(update)
+    update = Update.de_json(data, telegram_app.bot)
+    await telegram_app.process_update(update)
     return {"ok": True}
 
 @app.get("/")
