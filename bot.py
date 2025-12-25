@@ -35,6 +35,7 @@ known_chats = {}
 app = FastAPI()
 telegram_app: Application = ApplicationBuilder().token(TOKEN).build()
 
+# ───────────── МЕНЮ ─────────────
 def chat_menu(chat_id: int):
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("ℹ️ Информация о чате", callback_data=f"info:{chat_id}")],
@@ -59,6 +60,7 @@ async def is_admin(bot, chat_id, user_id) -> bool:
     member = await bot.get_chat_member(chat_id, user_id)
     return isinstance(member, (ChatMemberAdministrator, ChatMemberOwner))
 
+# ───────────── /start ─────────────
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type != "private":
         return
@@ -68,6 +70,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.clear()
     await update.message.reply_text("Выберите чат:", reply_markup=chat_select_keyboard())
 
+# ───────────── КНОПКИ ─────────────
 async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -100,13 +103,14 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         lines = ["📊 Сегодня:\n"]
         for uid, cnt in sorted(stats.items(), key=lambda x: x[1], reverse=True):
-            lines.append(f"{user_names.get(uid)}: {cnt}")
+            lines.append(f"{user_names.get(uid, 'Неизвестный')}: {cnt}")
         await query.message.reply_text("\n".join(lines))
     elif action in ("set_period", "words_all", "words_word", "words_tag"):
         context.user_data["mode"] = "words_all" if action == "set_period" else action
         context.user_data["step"] = "period"
         await query.message.reply_text("Введите период:\nДД-ММ-ГГГГ ДД-ММ-ГГГГ")
 
+# ───────────── ВВОД ПОЛЬЗОВАТЕЛЯ ─────────────
 async def input_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type != "private":
         return
@@ -162,10 +166,11 @@ async def show_word_stats(update, chat_id, start, end, word=None, tag=None):
         return
     lines = ["📝 Статистика слов:\n"]
     for uid, cnt in sorted(counter.items(), key=lambda x: x[1], reverse=True):
-        lines.append(f"{user_names.get(uid)}: {cnt}")
+        lines.append(f"{user_names.get(uid, 'Неизвестный')}: {cnt}")
     lines.append(f"\n📊 Всего слов: {total}")
     await update.message.reply_text("\n".join(lines))
 
+# ───────────── ОБРАБОТКА СООБЩЕНИЙ ─────────────
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or update.message.from_user.is_bot:
         return
@@ -179,8 +184,8 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if update.message.text:
             message_texts[chat.id][date_str].append((user.id, update.message.text.lower()))
 
+# ───────────── АВТОМАТИЧЕСКОЕ ДОБАВЛЕНИЕ ЧАТА ─────────────
 async def track_new_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Добавляем чат в known_chats сразу при присоединении бота"""
     chat = update.effective_chat
     if chat.type in ("group", "supergroup"):
         known_chats[chat.id] = chat.title
