@@ -4,7 +4,7 @@ from collections import defaultdict
 from datetime import datetime
 
 from fastapi import FastAPI, Request
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ChatMemberAdministrator, ChatMemberOwner, ChatMember
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ChatMemberAdministrator, ChatMemberOwner
 from telegram.error import RetryAfter
 from telegram.ext import (
     Application,
@@ -14,7 +14,7 @@ from telegram.ext import (
     CallbackQueryHandler,
     ContextTypes,
     filters,
-    ChatMemberHandler
+    ChatMemberHandler,
 )
 
 TOKEN = os.getenv("TOKEN")
@@ -35,7 +35,6 @@ known_chats = {}
 app = FastAPI()
 telegram_app: Application = ApplicationBuilder().token(TOKEN).build()
 
-# ───────────── МЕНЮ ─────────────
 def chat_menu(chat_id: int):
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("ℹ️ Информация о чате", callback_data=f"info:{chat_id}")],
@@ -60,7 +59,6 @@ async def is_admin(bot, chat_id, user_id) -> bool:
     member = await bot.get_chat_member(chat_id, user_id)
     return isinstance(member, (ChatMemberAdministrator, ChatMemberOwner))
 
-# ───────────── /start ─────────────
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type != "private":
         return
@@ -70,7 +68,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.clear()
     await update.message.reply_text("Выберите чат:", reply_markup=chat_select_keyboard())
 
-# ───────────── КНОПКИ ─────────────
 async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -110,7 +107,6 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data["step"] = "period"
         await query.message.reply_text("Введите период:\nДД-ММ-ГГГГ ДД-ММ-ГГГГ")
 
-# ───────────── ВВОД ПОЛЬЗОВАТЕЛЯ ─────────────
 async def input_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type != "private":
         return
@@ -150,7 +146,7 @@ async def show_word_stats(update, chat_id, start, end, word=None, tag=None):
     total = 0
     for date_str, msgs in message_texts.get(chat_id, {}).items():
         date = datetime.strptime(date_str, "%d-%m-%Y")
-        if not (start <= date <= end):
+        if not (start.date() <= date.date() <= end.date()):
             continue
         for uid, text in msgs:
             for w in text.split():
@@ -170,7 +166,6 @@ async def show_word_stats(update, chat_id, start, end, word=None, tag=None):
     lines.append(f"\n📊 Всего слов: {total}")
     await update.message.reply_text("\n".join(lines))
 
-# ───────────── ОБРАБОТКА СООБЩЕНИЙ ─────────────
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or update.message.from_user.is_bot:
         return
@@ -184,7 +179,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if update.message.text:
             message_texts[chat.id][date_str].append((user.id, update.message.text.lower()))
 
-# ───────────── АВТОМАТИЧЕСКОЕ ДОБАВЛЕНИЕ ЧАТА ─────────────
 async def track_new_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
     if chat.type in ("group", "supergroup"):
