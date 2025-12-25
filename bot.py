@@ -19,6 +19,7 @@ from telegram.ext import (
     ContextTypes,
     filters,
 )
+from telegram.error import RetryAfter
 
 TOKEN = os.getenv("TOKEN")
 DOMAIN = os.getenv("KOYEB_PUBLIC_DOMAIN")
@@ -71,11 +72,9 @@ def normalize(word: str) -> str:
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type != "private":
         return
-
     if not known_chats:
         await update.message.reply_text("Я ещё не добавлен ни в один чат.")
         return
-
     context.user_data.clear()
     await update.message.reply_text(
         "Выберите чат:",
@@ -85,7 +84,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def refresh(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type != "private":
         return
-
     valid_chats = {}
     for chat_id, title in known_chats.items():
         try:
@@ -93,16 +91,13 @@ async def refresh(update: Update, context: ContextTypes.DEFAULT_TYPE):
             valid_chats[chat_id] = title
         except:
             pass
-
     known_chats.clear()
     known_chats.update(valid_chats)
-
     if not known_chats:
         await update.message.reply_text(
             "❗ Напиши любое сообщение в группе, где есть бот, чтобы обновить список чатов."
         )
         return
-
     await update.message.reply_text(
         "Список чатов обновлён",
         reply_markup=chat_select_keyboard()
@@ -111,7 +106,6 @@ async def refresh(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-
     if query.data == "change_chat":
         context.user_data.clear()
         await query.message.reply_text(
@@ -119,21 +113,17 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=chat_select_keyboard()
         )
         return
-
     action, chat_id = query.data.split(":")
     chat_id = int(chat_id)
     context.user_data["chat_id"] = chat_id
-
     if not await is_admin(context.bot, chat_id, query.from_user.id):
         await query.message.reply_text("⛔ Только для администраторов")
         return
-
     if action == "select":
         await query.message.reply_text(
             f"Управление чатом: {known_chats.get(chat_id)}",
             reply_markup=chat_menu(chat_id)
         )
-
     elif action == "info":
         stats = message_stats.get(chat_id, {})
         users = set()
@@ -142,25 +132,21 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             for uid, cnt in day.items():
                 users.add(uid)
                 total += cnt
-
         await query.message.reply_text(
             f"ℹ️ Чат: {known_chats.get(chat_id)}\n"
             f"👥 Активных участников: {len(users)}\n"
             f"💬 Сообщений всего: {total}"
         )
-
     elif action == "today":
         today = datetime.utcnow().strftime("%d-%m-%Y")
         stats = message_stats.get(chat_id, {}).get(today, {})
         if not stats:
             await query.message.reply_text("Сегодня сообщений нет")
             return
-
         lines = ["📊 Сегодня:\n"]
         for uid, cnt in sorted(stats.items(), key=lambda x: x[1], reverse=True):
             lines.append(f"{user_names.get(uid)}: {cnt}")
         await query.message.reply_text("\n".join(lines))
-
     elif action in ("set_period", "words_all", "words_word", "words_tag"):
         context.user_data["mode"] = "words_all" if action == "set_period" else action
         context.user_data["step"] = "period"
@@ -169,37 +155,28 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def input_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type != "private":
         return
-
     chat_id = context.user_data.get("chat_id")
     mode = context.user_data.get("mode")
     step = context.user_data.get("step")
-
     if not chat_id or not mode or not step:
         return
-
     text = update.message.text.strip()
-
     if step == "period":
         try:
             start, end = parse_period(text)
         except:
             await update.message.reply_text("❌ Неверный формат")
             return
-
         context.user_data["period"] = (start, end)
-
         if mode == "words_all":
             await show_word_stats(update, chat_id, start, end)
             context.user_data.clear()
             return
-
         context.user_data["step"] = "value"
         await update.message.reply_text("Введите слово или хештег")
-
     elif step == "value":
         start, end = context.user_data["period"]
         value = normalize(text)
-
         if mode == "words_word":
             await show_word_stats(update, chat_id, start, end, word=value)
         elif mode == "words_tag":
@@ -207,18 +184,15 @@ async def input_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await update.message.reply_text("❌ Хештег должен начинаться с #")
                 return
             await show_word_stats(update, chat_id, start, end, tag=value)
-
         context.user_data.clear()
 
 async def show_word_stats(update, chat_id, start, end, word=None, tag=None):
     counter = defaultdict(int)
     total = 0
-
     for date_str, msgs in message_texts.get(chat_id, {}).items():
         date = datetime.strptime(date_str, "%d-%m-%Y")
         if not (start <= date <= end):
             continue
-
         for uid, text in msgs:
             for raw in text.split():
                 w = normalize(raw)
@@ -228,11 +202,9 @@ async def show_word_stats(update, chat_id, start, end, word=None, tag=None):
                     continue
                 counter[uid] += 1
                 total += 1
-
     if not counter:
         await update.message.reply_text("Данных нет")
         return
-
     lines = ["📝 Статистика слов:\n"]
     for uid, cnt in sorted(counter.items(), key=lambda x: x[1], reverse=True):
         lines.append(f"{user_names.get(uid)}: {cnt}")
@@ -242,23 +214,19 @@ async def show_word_stats(update, chat_id, start, end, word=None, tag=None):
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or update.message.from_user.is_bot:
         return
-
     chat = update.effective_chat
     user = update.effective_user
-
     if chat.type in ("group", "supergroup"):
         known_chats[chat.id] = chat.title
         date_str = update.message.date.strftime("%d-%m-%Y")
         user_names[user.id] = user.full_name
         message_stats[chat.id][date_str][user.id] += 1
-
         if update.message.text:
             message_texts[chat.id][date_str].append(
                 (user.id, update.message.text.lower())
             )
 
 tg_app: Application = ApplicationBuilder().token(TOKEN).build()
-
 tg_app.add_handler(CommandHandler("start", start))
 tg_app.add_handler(CommandHandler("refresh", refresh))
 tg_app.add_handler(CallbackQueryHandler(menu_callback))
@@ -269,8 +237,15 @@ tg_app.add_handler(MessageHandler(filters.TEXT, handle_text))
 async def on_startup():
     await tg_app.initialize()
     await tg_app.start()
-    await tg_app.bot.set_webhook(WEBHOOK_URL)
-    print("Webhook set:", WEBHOOK_URL)
+    try:
+        current = await tg_app.bot.get_webhook_info()
+        if current.url != WEBHOOK_URL:
+            await tg_app.bot.set_webhook(WEBHOOK_URL)
+        print(f"Webhook set: {WEBHOOK_URL}")
+    except RetryAfter as e:
+        print(f"RetryAfter: try again in {e.retry_after} seconds")
+    except Exception as e:
+        print(f"Error in startup: {e}")
 
 @app.on_event("shutdown")
 async def on_shutdown():
@@ -287,18 +262,3 @@ async def telegram_webhook(request: Request):
 @app.get("/")
 async def root():
     return {"status": "ok"}
-
-@app.on_event("startup")
-async def on_startup():
-    try:
-        await tg_app.initialize()
-        await tg_app.start()
-        await tg_app.bot.set_webhook(WEBHOOK_URL)
-        print(f"Webhook set: {WEBHOOK_URL}")
-    except Exception as e:
-        print(f"Error in startup: {e}")
-
-
-   
-
-
