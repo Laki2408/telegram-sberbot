@@ -288,5 +288,17 @@ async def telegram_webhook(request: Request):
 async def root():
     return {"status": "ok"}
 
+@app.on_event("startup")
+async def on_startup():
+    try:
+        await tg_app.initialize()
+        await tg_app.start()
+        await tg_app.bot.set_webhook(WEBHOOK_URL)
+        print(f"Webhook set: {WEBHOOK_URL}")
+    except Exception as e:
+        print(f"Error in startup: {e}")
+
+
    
+
 
