@@ -17,6 +17,7 @@ from telegram.ext import (
     ChatMemberHandler,
 )
 
+# ───────────── ENV ─────────────
 TOKEN = os.getenv("TOKEN")
 PORT = int(os.getenv("PORT", 8000))
 DOMAIN = os.getenv("KOYEB_PUBLIC_DOMAIN")
@@ -27,14 +28,17 @@ if not TOKEN or not DOMAIN:
 WEBHOOK_PATH = f"/webhook/{TOKEN}"
 WEBHOOK_URL = f"https://{DOMAIN}{WEBHOOK_PATH}"
 
+# ───────────── ХРАНИЛИЩА ─────────────
 message_stats = defaultdict(lambda: defaultdict(lambda: defaultdict(int)))
 message_texts = defaultdict(lambda: defaultdict(list))
 user_names = {}
 known_chats = {}
 
+# ───────────── FASTAPI ─────────────
 app = FastAPI()
 telegram_app: Application = ApplicationBuilder().token(TOKEN).build()
 
+# ───────────── МЕНЮ ─────────────
 def chat_menu(chat_id: int):
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("ℹ️ Информация о чате", callback_data=f"info:{chat_id}")],
@@ -58,6 +62,8 @@ def normalize(word: str) -> str:
 async def is_admin(bot, chat_id, user_id) -> bool:
     member = await bot.get_chat_member(chat_id, user_id)
     return isinstance(member, (ChatMemberAdministrator, ChatMemberOwner))
+
+# ───────────── HANDLERS ─────────────
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type != "private":
@@ -188,29 +194,29 @@ async def track_new_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
     if chat.type in ("group", "supergroup"):
         known_chats[chat.id] = chat.title
-
-telegram_app.add_handler(CommandHandler("start", start))
-telegram_app.add_handler(CallbackQueryHandler(menu_callback))
-telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, input_handler))
-telegram_app.add_handler(MessageHandler(filters.TEXT, handle_text))
-telegram_app.add_handler(ChatMemberHandler(track_new_chat, ChatMemberHandler.MY_CHAT_MEMBER))
+# ───────────── FASTAPI LIFECYCLE ─────────────
 
 @app.on_event("startup")
 async def startup():
     await telegram_app.initialize()
     try:
-        current = await telegram_app.bot.get_webhook_info()
-        if current.url != WEBHOOK_URL:
-            await telegram_app.bot.set_webhook(WEBHOOK_URL, drop_pending_updates=True)
+        # Устанавливаем webhook при старте
+        await telegram_app.bot.set_webhook(WEBHOOK_URL)
         print("Webhook set:", WEBHOOK_URL)
     except RetryAfter as e:
+        # Если ограничение на количество запросов (flood control), подождём и повторим
         print(f"Webhook flood control, retry after {e.retry_after}s")
         await asyncio.sleep(e.retry_after)
-    except Exception as e:
-        print(f"Error in startup: {e}")
+
+@app.on_event("shutdown")
+async def shutdown():
+    # Останавливаем приложение Telegram и FastAPI при завершении
+    await telegram_app.stop()
+    await telegram_app.shutdown()
 
 @app.post(WEBHOOK_PATH)
 async def webhook(request: Request):
+    # Обрабатываем запросы от Telegram через webhook
     data = await request.json()
     update = Update.de_json(data, telegram_app.bot)
     await telegram_app.process_update(update)
@@ -218,4 +224,6 @@ async def webhook(request: Request):
 
 @app.get("/")
 async def root():
+    # Простой эндпоинт для проверки статуса сервера
     return {"status": "ok"}
+
