@@ -1,22 +1,367 @@
 import os
-import asyncio
 from collections import defaultdict
-from datetime import datetime, timedelta
+from datetime import datetime
 
-from fastapi import FastAPI, Request
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.error import RetryAfter
+from telegram import (
+    Update,
+    InlineKeyboardMarkup,
+    InlineKeyboardButton,
+    ChatMemberAdministrator,
+    ChatMemberOwner,
+)
 from telegram.ext import (
-    Application,
     ApplicationBuilder,
-    MessageHandler,
     CommandHandler,
     CallbackQueryHandler,
+    MessageHandler,
     ContextTypes,
     filters,
 )
 
-# ───────────── ENV ─────────────
+# ================================
+# CONFIG
+# ================================
+TOKEN = os.getenv("TOKEN") or "8211304414:AAGbr7vw8UGLKnHcgBGuGPJLwMQfCHO8a1Q"
+
+# ================================
+# STORAGE (RAM)
+# ================================
+message_stats = defaultdict(lambda: defaultdict(lambda: defaultdict(int)))
+message_texts = defaultdict(lambda: defaultdict(list))
+user_names = {}
+known_chats = {}
+
+# ================================
+# HELPERS
+# ================================
+async def is_admin(bot, chat_id, user_id) -> bool:
+    member = await bot.get_chat_member(chat_id, user_id)
+    return isinstance(member, (ChatMemberAdministrator, ChatMemberOwner))
+
+
+def chat_menu(chat_id: int):
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("ℹ️ Информация о чате", callback_data=f"info:{chat_id}")],
+        [InlineKeyboardButton("📊 Сегодня", callback_data=f"today:{chat_id}")],
+        [InlineKeyboardButton("📆 Выбрать период", callback_data=f"set_period:{chat_id}")],
+        [InlineKeyboardButton("📝 Кол-во слов (все)", callback_data=f"words_all:{chat_id}")],
+        [InlineKeyboardButton("🔍 Кол-во слов (по слову)", callback_data=f"words_word:{chat_id}")],
+        [InlineKeyboardButton("#️⃣ Кол-во слов (по хештегу)", callback_data=f"words_tag:{chat_id}")],
+        [InlineKeyboardButton("🔄 Сменить чат", callback_data="change_chat")],
+    ])
+
+
+def chat_select_keyboard():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(title, callback_data=f"select:{cid}")]
+        for cid, title in known_chats.items()
+    ])
+
+
+def parse_period(text: str):
+    start, end = text.split()
+    return (
+        datetime.strptime(start, "%d-%m-%Y"),
+        datetime.strptime(end, "%d-%m-%Y"),
+    )
+
+
+def normalize(word: str) -> str:
+    return word.strip(".,!?()[]{}:;\"'").lower()
+
+
+# ================================
+# /start
+# ================================
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_chat.type != "private":
+        return
+
+    if not known_chats:
+        await update.message.reply_text("Я ещё не добавлен ни в один чат.")
+        return
+
+    context.user_data.clear()
+    await update.message.reply_text(
+        "Выберите чат:",
+        reply_markup=chat_select_keyboard()
+    )
+
+
+# ================================
+# /refresh
+# ================================
+async def refresh(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_chat.type != "private":
+        return
+
+    chats = []
+    for chat_id in list(known_chats.keys()):
+        try:
+            await context.bot.get_chat(chat_id)
+            chats.append(chat_id)
+        except:
+            known_chats.pop(chat_id, None)
+
+    if not chats:
+        await update.message.reply_text(
+            "❗ Напиши любое сообщение в группе, где есть бот, чтобы обновить список чатов."
+        )
+        return
+
+    await update.message.reply_text(
+        "Список чатов обновлён",
+        reply_markup=chat_select_keyboard()
+    )
+
+
+# ================================
+# CALLBACKS
+# ================================
+async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    if query.data == "change_chat":
+        context.user_data.clear()
+        await query.message.reply_text(
+            "Выберите чат:",
+            reply_markup=chat_select_keyboard()
+        )
+        return
+
+    action, chat_id = query.data.split(":")
+    chat_id = int(chat_id)
+    context.user_data["chat_id"] = chat_id
+
+    if not await is_admin(context.bot, chat_id, query.from_user.id):
+        await query.message.reply_text("⛔ Только для администраторов")
+        return
+
+    if action == "select":
+        await query.message.reply_text(
+            f"Управление чатом: {known_chats.get(chat_id)}",
+            reply_markup=chat_menu(chat_id)
+        )
+
+    elif action == "info":
+        stats = message_stats.get(chat_id, {})
+        users = set()
+        total = 0
+        for day in stats.values():
+            for uid, cnt in day.items():
+                users.add(uid)
+                total += cnt
+
+        await query.message.reply_text(
+            f"ℹ️ Чат: {known_chats.get(chat_id)}\n"
+            f"👥 Активных участников: {len(users)}\n"
+            f"💬 Сообщений всего: {total}"
+        )
+
+    elif action == "today":
+        today = datetime.utcnow().strftime("%d-%m-%Y")
+        stats = message_stats.get(chat_id, {}).get(today, {})
+        if not stats:
+            await query.message.reply_text("Сегодня сообщений нет")
+            return
+
+        lines = ["📊 Сегодня:\n"]
+        for uid, cnt in sorted(stats.items(), key=lambda x: x[1], reverse=True):
+            lines.append(f"{user_names.get(uid)}: {cnt}")
+        await query.message.reply_text("\n".join(lines))
+
+    # ======= ОБРАБОТКА ПЕРИОДА =======
+    elif action == "set_period":
+        context.user_data["chat_id"] = chat_id
+        context.user_data["mode"] = "words_all"  # по умолчанию
+        context.user_data["step"] = "period"
+        await query.message.reply_text(
+            "Введите период для статистики:\nДД-ММ-ГГГГ ДД-ММ-ГГГГ"
+        )
+
+    elif action in ("words_all", "words_word", "words_tag"):
+        context.user_data["chat_id"] = chat_id
+        context.user_data["mode"] = action
+        context.user_data["step"] = "period"
+        await query.message.reply_text(
+            "Введите период для статистики:\nДД-ММ-ГГГГ ДД-ММ-ГГГГ"
+        )
+
+
+# ================================
+# INPUT FSM HANDLER
+# ================================
+async def input_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_chat.type != "private":
+        return
+
+    chat_id = context.user_data.get("chat_id")
+    mode = context.user_data.get("mode")
+    step = context.user_data.get("step")
+
+    if not chat_id or not mode or not step:
+        return
+
+    text = update.message.text.strip()
+
+    # STEP 1 — PERIOD
+    if step == "period":
+        try:
+            start, end = parse_period(text)
+        except Exception:
+            await update.message.reply_text("❌ Неверный формат периода")
+            return
+
+        context.user_data["period"] = (start, end)
+
+        if mode == "words_all":
+            await show_word_stats(update, chat_id, start, end)
+            context.user_data.clear()
+            return
+
+        context.user_data["step"] = "value"
+        await update.message.reply_text("Введите слово или хештег")
+        return
+
+    # STEP 2 — WORD / TAG
+    if step == "value":
+        start, end = context.user_data["period"]
+        value = normalize(text)
+
+        if mode == "words_word":
+            await show_word_stats(update, chat_id, start, end, word=value)
+        elif mode == "words_tag":
+            if not value.startswith("#"):
+                await update.message.reply_text("❌ Хештег должен начинаться с #")
+                return
+            await show_word_stats(update, chat_id, start, end, tag=value)
+
+        context.user_data.clear()
+
+
+# ================================
+# WORD STATS
+# ================================
+async def show_word_stats(update, chat_id, start, end, word=None, tag=None):
+    counter = defaultdict(int)
+    total = 0
+
+    for date_str, msgs in message_texts.get(chat_id, {}).items():
+        date = datetime.strptime(date_str, "%d-%m-%Y")
+        # Преобразуем даты в формат без времени для правильного сравнения
+        if not (start.date() <= date.date() <= end.date()):
+            continue
+
+        for uid, text in msgs:
+            for raw in text.split():
+                w = normalize(raw)
+                if word and w != word:
+                    continue
+                if tag and w != tag:
+                    continue
+                counter[uid] += 1
+                total += 1
+
+    if not counter:
+        await update.message.reply_text("Данных нет")
+        return
+
+    lines = ["📝 Статистика слов:\n"]
+    for uid, cnt in sorted(counter.items(), key=lambda x: x[1], reverse=True):
+        lines.append(f"{user_names.get(uid)}: {cnt}")
+    lines.append(f"\n📊 Всего слов: {total}")
+    await update.message.reply_text("\n".join(lines))
+
+
+# ================================
+# GROUP MESSAGE COLLECTOR
+# ================================
+async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message or update.message.from_user.is_bot:
+        return
+
+    chat = update.effective_chat
+    user = update.effective_user
+
+    if chat.type in ("group", "supergroup"):
+        known_chats[chat.id] = chat.title
+        date_str = update.message.date.strftime("%d-%m-%Y")
+        user_names[user.id] = user.full_name
+        message_stats[chat.id][date_str][user.id] += 1
+
+        if update.message.text:
+            message_texts[chat.id][date_str].append((user.id, update.message.text.lower()))
+
+
+# ================================
+# MAIN
+# ================================
+def main():
+    app: Application = ApplicationBuilder().token(TOKEN).build()
+
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("refresh", refresh))  # добавили /refresh
+    app.add_handler(CallbackQueryHandler(menu_callback))
+    app.add_handler(MessageHandler(filters.TEXT & filters.ChatType.PRIVATE, input_handler))
+    app.add_handler(MessageHandler(filters.TEXT, handle_text))
+
+    print("### NEW VERSION LOADED ###")
+    print("🤖 Bot started (polling)")
+    app.run_polling()
+
+
+if __name__ == "__main__":
+    main()
+
+Основные изменения:
+
+    В функции show_word_stats добавлена корректная фильтрация по дате:
+
+if not (start.date() <= date.date() <= end.date()):
+
+Убедитесь, что при записи сообщений дата сохраняется без времени:
+
+    date_str = update.message.date.strftime("%d-%m-%Y")
+
+Теперь этот код должен правильно обрабатывать сообщения за указанный период и выводить статистику. Если у вас останутся вопросы или появятся дополнительные проблемы, дайте знать!
+You said:
+теперь корректно вставь TOKEN = os.getenv("TOKEN")
+PORT = int(os.getenv("PORT", 8000))
+DOMAIN = os.getenv("KOYEB_PUBLIC_DOMAIN")
+
+if not TOKEN or not DOMAIN:
+    raise RuntimeError("TOKEN or KOYEB_PUBLIC_DOMAIN is missing")
+
+WEBHOOK_PATH = f"/webhook/{TOKEN}"
+WEBHOOK_URL = f"https://{DOMAIN}{WEBHOOK_PATH}"
+ChatGPT said:
+
+Вот исправленный код с учетом вставки переменных для TOKEN, PORT, DOMAIN и других параметров для вебхука:
+
+import os
+from collections import defaultdict
+from datetime import datetime
+
+from telegram import (
+    Update,
+    InlineKeyboardMarkup,
+    InlineKeyboardButton,
+    ChatMemberAdministrator,
+    ChatMemberOwner,
+)
+from telegram.ext import (
+    ApplicationBuilder,
+    CommandHandler,
+    CallbackQueryHandler,
+    MessageHandler,
+    ContextTypes,
+    filters,
+)
+
+# ================================
+# CONFIG
+# ================================
 TOKEN = os.getenv("TOKEN")
 PORT = int(os.getenv("PORT", 8000))
 DOMAIN = os.getenv("KOYEB_PUBLIC_DOMAIN")
@@ -27,161 +372,252 @@ if not TOKEN or not DOMAIN:
 WEBHOOK_PATH = f"/webhook/{TOKEN}"
 WEBHOOK_URL = f"https://{DOMAIN}{WEBHOOK_PATH}"
 
-# ───────────── ХРАНИЛИЩА ─────────────
+# ================================
+# STORAGE (RAM)
+# ================================
 message_stats = defaultdict(lambda: defaultdict(lambda: defaultdict(int)))
 message_texts = defaultdict(lambda: defaultdict(list))
 user_names = {}
+known_chats = {}
 
-# ───────────── FASTAPI ─────────────
-app = FastAPI()
-telegram_app: Application = ApplicationBuilder().token(TOKEN).build()
+# ================================
+# HELPERS
+# ================================
+async def is_admin(bot, chat_id, user_id) -> bool:
+    member = await bot.get_chat_member(chat_id, user_id)
+    return isinstance(member, (ChatMemberAdministrator, ChatMemberOwner))
 
-# ───────────── МЕНЮ ─────────────
-def menu_keyboard():
+
+def chat_menu(chat_id: int):
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📊 Статистика за сегодня", callback_data="today")],
-        [InlineKeyboardButton("📆 Статистика за период", callback_data="period")],
-        [InlineKeyboardButton("🔍 Поиск по слову", callback_data="search_word")],
-        [InlineKeyboardButton("#️⃣ Поиск по хештегу", callback_data="search_tag")],
+        [InlineKeyboardButton("ℹ️ Информация о чате", callback_data=f"info:{chat_id}")],
+        [InlineKeyboardButton("📊 Сегодня", callback_data=f"today:{chat_id}")],
+        [InlineKeyboardButton("📆 Выбрать период", callback_data=f"set_period:{chat_id}")],
+        [InlineKeyboardButton("📝 Кол-во слов (все)", callback_data=f"words_all:{chat_id}")],
+        [InlineKeyboardButton("🔍 Кол-во слов (по слову)", callback_data=f"words_word:{chat_id}")],
+        [InlineKeyboardButton("#️⃣ Кол-во слов (по хештегу)", callback_data=f"words_tag:{chat_id}")],
+        [InlineKeyboardButton("🔄 Сменить чат", callback_data="change_chat")],
     ])
 
-# ───────────── СТАРТ ─────────────
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data.clear()
-    await update.message.reply_text("Выберите действие:", reply_markup=menu_keyboard())
 
-# ───────────── КНОПКИ ─────────────
+def chat_select_keyboard():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(title, callback_data=f"select:{cid}")]
+        for cid, title in known_chats.items()
+    ])
+
+
+def parse_period(text: str):
+    start, end = text.split()
+    return (
+        datetime.strptime(start, "%d-%m-%Y"),
+        datetime.strptime(end, "%d-%m-%Y"),
+    )
+
+
+def normalize(word: str) -> str:
+    return word.strip(".,!?()[]{}:;\"'").lower()
+
+
+# ================================
+# /start
+# ================================
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_chat.type != "private":
+        return
+
+    if not known_chats:
+        await update.message.reply_text("Я ещё не добавлен ни в один чат.")
+        return
+
+    context.user_data.clear()
+    await update.message.reply_text(
+        "Выберите чат:",
+        reply_markup=chat_select_keyboard()
+    )
+
+
+# ================================
+# /refresh
+# ================================
+async def refresh(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_chat.type != "private":
+        return
+
+    chats = []
+    for chat_id in list(known_chats.keys()):
+        try:
+            await context.bot.get_chat(chat_id)
+            chats.append(chat_id)
+        except:
+            known_chats.pop(chat_id, None)
+
+    if not chats:
+        await update.message.reply_text(
+            "❗ Напиши любое сообщение в группе, где есть бот, чтобы обновить список чатов."
+        )
+        return
+
+    await update.message.reply_text(
+        "Список чатов обновлён",
+        reply_markup=chat_select_keyboard()
+    )
+
+
+# ================================
+# CALLBACKS
+# ================================
 async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    context.user_data.clear()
 
-    if query.data == "today":
-        await show_today(query)
-        await query.message.reply_text("Выберите действие:", reply_markup=menu_keyboard())
-
-    elif query.data == "period":
-        context.user_data["await"] = "period"
-        await query.message.reply_text("Введите период: ДД-ММ-ГГГГ ДД-ММ-ГГГГ")
-
-    elif query.data == "search_word":
-        context.user_data["await"] = "search"
-        context.user_data["mode"] = "word"
-        await query.message.reply_text("Введите слово для поиска")
-
-    elif query.data == "search_tag":
-        context.user_data["await"] = "search"
-        context.user_data["mode"] = "tag"
-        await query.message.reply_text("Введите хештег")
-
-# ───────────── СЕГОДНЯ ─────────────
-async def show_today(query):
-    chat_id = query.message.chat_id
-    today = datetime.utcnow().strftime("%Y-%m-%d")
-
-    stats = message_stats.get(chat_id, {}).get(today)
-    if not stats:
-        await query.message.reply_text("Сегодня сообщений ещё нет")
+    if query.data == "change_chat":
+        context.user_data.clear()
+        await query.message.reply_text(
+            "Выберите чат:",
+            reply_markup=chat_select_keyboard()
+        )
         return
 
-    lines = ["📊 Сообщения за сегодня:\n"]
-    for uid, cnt in sorted(stats.items(), key=lambda x: x[1], reverse=True):
-        lines.append(f"{user_names.get(uid, 'Неизвестный')}: {cnt}")
+    action, chat_id = query.data.split(":")
+    chat_id = int(chat_id)
+    context.user_data["chat_id"] = chat_id
 
-    await query.message.reply_text("\n".join(lines))
-
-# ───────────── ТЕКСТ ─────────────
-async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.message or update.message.from_user.is_bot:
+    if not await is_admin(context.bot, chat_id, query.from_user.id):
+        await query.message.reply_text("⛔ Только для администраторов")
         return
 
-    text = update.message.text
-    if text.startswith("/"):
-        return
+    if action == "select":
+        await query.message.reply_text(
+            f"Управление чатом: {known_chats.get(chat_id)}",
+            reply_markup=chat_menu(chat_id)
+        )
 
-    chat_id = update.message.chat_id
-    user = update.message.from_user
-    date_str = update.message.date.strftime("%Y-%m-%d")
+    elif action == "info":
+        stats = message_stats.get(chat_id, {})
+        users = set()
+        total = 0
+        for day in stats.values():
+            for uid, cnt in day.items():
+                users.add(uid)
+                total += cnt
 
-    user_names[user.id] = user.full_name
-    message_stats[chat_id][date_str][user.id] += 1
-    message_texts[chat_id][date_str].append((user.id, text.lower()))
+        await query.message.reply_text(
+            f"ℹ️ Чат: {known_chats.get(chat_id)}\n"
+            f"👥 Активных участников: {len(users)}\n"
+            f"💬 Сообщений всего: {total}"
+        )
 
-    state = context.user_data.get("await")
-
-    if state == "period":
-        try:
-            start_d, end_d = text.split()
-            start = datetime.strptime(start_d, "%d-%m-%Y")
-            end = datetime.strptime(end_d, "%d-%m-%Y")
-        except:
-            await update.message.reply_text("❌ Формат: 01-12-2025 10-12-2025")
+    elif action == "today":
+        today = datetime.utcnow().strftime("%d-%m-%Y")
+        stats = message_stats.get(chat_id, {}).get(today, {})
+        if not stats:
+            await query.message.reply_text("Сегодня сообщений нет")
             return
 
-        result = defaultdict(int)
-        cur = start
-        while cur <= end:
-            key = cur.strftime("%Y-%m-%d")
-            for uid, cnt in message_stats.get(chat_id, {}).get(key, {}).items():
-                result[uid] += cnt
-            cur += timedelta(days=1)
+        lines = ["📊 Сегодня:\n"]
+        for uid, cnt in sorted(stats.items(), key=lambda x: x[1], reverse=True):
+            lines.append(f"{user_names.get(uid)}: {cnt}")
+        await query.message.reply_text("\n".join(lines))
 
-        if not result:
-            await update.message.reply_text("Нет данных за период")
-        else:
-            lines = [f"📆 Статистика с {start_d} по {end_d}:\n"]
-            for uid, cnt in sorted(result.items(), key=lambda x: x[1], reverse=True):
-                lines.append(f"{user_names.get(uid, 'Неизвестный')}: {cnt}")
-            await update.message.reply_text("\n".join(lines))
-
-        context.user_data.clear()
-        await update.message.reply_text("Выберите действие:", reply_markup=menu_keyboard())
-
-    elif state == "search":
-        q = text.lower()
-        total = defaultdict(int)
-
-        for day in message_texts.get(chat_id, {}).values():
-            for uid, msg in day:
-                if q in msg:
-                    total[uid] += 1
-
-        if not total:
-            await update.message.reply_text(f"Совпадений с '{q}' не найдено")
-        else:
-            icon = "🔍" if context.user_data.get("mode") == "word" else "#️⃣"
-            lines = [f"{icon} Найдено сообщений с '{q}':\n"]
-            for uid, cnt in sorted(total.items(), key=lambda x: x[1], reverse=True):
-                lines.append(f"{user_names.get(uid, 'Неизвестный')}: {cnt}")
-            await update.message.reply_text("\n".join(lines))
-
-        context.user_data.clear()
-        await update.message.reply_text("Выберите действие:", reply_markup=menu_keyboard())
-
-# ───────────── WEBHOOK ─────────────
-@app.on_event("startup")
-async def startup():
-    telegram_app.add_handler(CommandHandler("start", start))
-    telegram_app.add_handler(CallbackQueryHandler(menu_callback))
-    telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
-
-    # ───── Инициализация приложения ─────
-    await telegram_app.initialize()
-
-    try:
-        await telegram_app.bot.set_webhook(
-            WEBHOOK_URL,
-            drop_pending_updates=True
+    # ======= ОБРАБОТКА ПЕРИОДА =======
+    elif action == "set_period":
+        context.user_data["chat_id"] = chat_id
+        context.user_data["mode"] = "words_all"  # по умолчанию
+        context.user_data["step"] = "period"
+        await query.message.reply_text(
+            "Введите период для статистики:\nДД-ММ-ГГГГ ДД-ММ-ГГГГ"
         )
-        print("Webhook set:", WEBHOOK_URL)
 
-    except RetryAfter as e:
-        print(f"Webhook flood control, retry after {e.retry_after}s")
-        await asyncio.sleep(e.retry_after)
+    elif action in ("words_all", "words_word", "words_tag"):
+        context.user_data["chat_id"] = chat_id
+        context.user_data["mode"] = action
+        context.user_data["step"] = "period"
+        await query.message.reply_text(
+            "Введите период для статистики:\nДД-ММ-ГГГГ ДД-ММ-ГГГГ"
+        )
 
-@app.post(WEBHOOK_PATH)
-async def webhook(request: Request):
-    data = await request.json()
-    update = Update.de_json(data, telegram_app.bot)
-    await telegram_app.process_update(update)
-    return {"ok": True}
+
+# ================================
+# INPUT FSM HANDLER
+# ================================
+async def input_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_chat.type != "private":
+        return
+
+    chat_id = context.user_data.get("chat_id")
+    mode = context.user_data.get("mode")
+    step = context.user_data.get("step")
+
+    if not chat_id or not mode or not step:
+        return
+
+    text = update.message.text.strip()
+
+    # STEP 1 — PERIOD
+    if step == "period":
+        try:
+            start, end = parse_period(text)
+        except Exception:
+            await update.message.reply_text("❌ Неверный формат периода")
+            return
+
+        context.user_data["period"] = (start, end)
+
+        if mode == "words_all":
+            await show_word_stats(update, chat_id, start, end)
+            context.user_data.clear()
+            return
+
+        context.user_data["step"] = "value"
+        await update.message.reply_text("Введите слово или хештег")
+        return
+
+    # STEP 2 — WORD / TAG
+    if step == "value":
+        start, end = context.user_data["period"]
+        value = normalize(text)
+
+        if mode == "words_word":
+            await show_word_stats(update, chat_id, start, end, word=value)
+        elif mode == "words_tag":
+            if not value.startswith("#"):
+                await update.message.reply_text("❌ Хештег должен начинаться с #")
+                return
+            await show_word_stats(update, chat_id, start, end, tag=value)
+
+        context.user_data.clear()
+
+
+# ================================
+# WORD STATS
+# ================================
+async def show_word_stats(update, chat_id, start, end, word=None, tag=None):
+    counter = defaultdict(int)
+    total = 0
+
+    for date_str, msgs in message_texts.get(chat_id, {}).items():
+        date = datetime.strptime(date_str, "%d-%m-%Y")
+        # Преобразуем даты в формат без времени для правильного сравнения
+        if not (start.date() <= date.date() <= end.date()):
+            continue
+
+        for uid, text in msgs:
+            for raw in text.split():
+                w = normalize(raw)
+                if word and w != word:
+                    continue
+                if tag and w != tag:
+                    continue
+                counter[uid] += 1
+                total += 1
+
+    if not counter:
+        await update.message.reply_text("Данных нет")
+        return
+
+    lines = ["📝 Статистика слов:\n"]
+    for uid, cnt in sorted(counter.items(), key=lambda x: x[1], reverse=True):
+        lines.append(f"{user_names.get(uid)}: {cnt}")
+    lines.append(f"\n📊 Всего слов: {total}")
+    await update.message.reply_text("\n".join(lines))
