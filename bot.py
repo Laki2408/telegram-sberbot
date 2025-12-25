@@ -20,9 +20,6 @@ from telegram.ext import (
     filters,
 )
 
-# ================================
-# CONFIG
-# ================================
 TOKEN = os.getenv("TOKEN")
 DOMAIN = os.getenv("KOYEB_PUBLIC_DOMAIN")
 PORT = int(os.getenv("PORT", 8000))
@@ -33,26 +30,16 @@ if not TOKEN or not DOMAIN:
 WEBHOOK_PATH = f"/webhook/{TOKEN}"
 WEBHOOK_URL = f"https://{DOMAIN}{WEBHOOK_PATH}"
 
-# ================================
-# FASTAPI APP (ASGI)
-# ================================
 app = FastAPI()
 
-# ================================
-# STORAGE (RAM)
-# ================================
 message_stats = defaultdict(lambda: defaultdict(lambda: defaultdict(int)))
 message_texts = defaultdict(lambda: defaultdict(list))
 user_names = {}
 known_chats = {}
 
-# ================================
-# HELPERS
-# ================================
 async def is_admin(bot, chat_id, user_id) -> bool:
     member = await bot.get_chat_member(chat_id, user_id)
     return isinstance(member, (ChatMemberAdministrator, ChatMemberOwner))
-
 
 def chat_menu(chat_id: int):
     return InlineKeyboardMarkup([
@@ -65,13 +52,11 @@ def chat_menu(chat_id: int):
         [InlineKeyboardButton("🔄 Сменить чат", callback_data="change_chat")],
     ])
 
-
 def chat_select_keyboard():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton(title, callback_data=f"select:{cid}")]
         for cid, title in known_chats.items()
     ])
-
 
 def parse_period(text: str):
     start, end = text.split()
@@ -80,21 +65,15 @@ def parse_period(text: str):
         datetime.strptime(end, "%d-%m-%Y"),
     )
 
-
 def normalize(word: str) -> str:
     return word.strip(".,!?()[]{}:;\"'").lower()
 
-# ================================
-# BOT HANDLERS
-# ================================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type != "private":
         return
 
-    # Logging to check if the bot has added any chats
     if not known_chats:
         await update.message.reply_text("Я ещё не добавлен ни в один чат.")
-        print("No chats found. Bot hasn't been added to any chats yet.")
         return
 
     context.user_data.clear()
@@ -102,7 +81,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Выберите чат:",
         reply_markup=chat_select_keyboard()
     )
-
 
 async def refresh(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type != "private":
@@ -113,8 +91,8 @@ async def refresh(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             await context.bot.get_chat(chat_id)
             valid_chats[chat_id] = title
-        except Exception as e:
-            print(f"Error checking chat {chat_id}: {e}")
+        except:
+            pass
 
     known_chats.clear()
     known_chats.update(valid_chats)
@@ -129,7 +107,6 @@ async def refresh(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Список чатов обновлён",
         reply_markup=chat_select_keyboard()
     )
-
 
 async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -189,7 +166,6 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data["step"] = "period"
         await query.message.reply_text("Введите период:\nДД-ММ-ГГГГ ДД-ММ-ГГГГ")
 
-
 async def input_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type != "private":
         return
@@ -234,7 +210,6 @@ async def input_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         context.user_data.clear()
 
-
 async def show_word_stats(update, chat_id, start, end, word=None, tag=None):
     counter = defaultdict(int)
     total = 0
@@ -264,7 +239,6 @@ async def show_word_stats(update, chat_id, start, end, word=None, tag=None):
     lines.append(f"\n📊 Всего слов: {total}")
     await update.message.reply_text("\n".join(lines))
 
-
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or update.message.from_user.is_bot:
         return
@@ -283,5 +257,34 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 (user.id, update.message.text.lower())
             )
 
+tg_app: Application = ApplicationBuilder().token(TOKEN).build()
 
+tg_app.add_handler(CommandHandler("start", start))
+tg_app.add_handler(CommandHandler("refresh", refresh))
+tg_app.add_handler(CallbackQueryHandler(menu_callback))
+tg_app.add_handler(MessageHandler(filters.TEXT & filters.ChatType.PRIVATE, input_handler))
+tg_app.add_handler(MessageHandler(filters.TEXT, handle_text))
 
+@app.on_event("startup")
+async def on_startup():
+    await tg_app.initialize()
+    await tg_app.start()
+    await tg_app.bot.set_webhook(WEBHOOK_URL)
+    print("Webhook set:", WEBHOOK_URL)
+    
+    @app.on_event("shutdown")
+    async def on_shutdown():
+    await tg_app.stop()
+    await tg_app.shutdown()
+    
+    @app.post(WEBHOOK_PATH)
+    async def telegram_webhook(request: Request):
+    data = await request.json()
+    update = Update.de_json(data, tg_app.bot)
+    await tg_app.process_update(update)
+    return {"ok": True}
+    
+    @app.get("/")
+    async def root():
+    return {"status": "ok"}
+   
