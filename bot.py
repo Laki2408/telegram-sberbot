@@ -271,20 +271,22 @@ async def on_startup():
     await tg_app.start()
     await tg_app.bot.set_webhook(WEBHOOK_URL)
     print("Webhook set:", WEBHOOK_URL)
-    
-    @app.on_event("shutdown")
-    async def on_shutdown():
+
+@app.on_event("shutdown")
+async def on_shutdown():
     await tg_app.stop()
     await tg_app.shutdown()
-    
-    @app.post(WEBHOOK_PATH)
-    async def telegram_webhook(request: Request):
+
+@app.post(WEBHOOK_PATH)
+async def telegram_webhook(request: Request):
     data = await request.json()
     update = Update.de_json(data, tg_app.bot)
     await tg_app.process_update(update)
     return {"ok": True}
-    
-    @app.get("/")
-    async def root():
+
+@app.get("/")
+async def root():
     return {"status": "ok"}
+
    
+
