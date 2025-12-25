@@ -1,6 +1,8 @@
 import os
 import asyncio
 from collections import defaultdict
+from datetime import datetime, timedelta
+
 from fastapi import FastAPI, Request
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ChatMemberAdministrator, ChatMemberOwner
 from telegram.error import RetryAfter
@@ -91,8 +93,14 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 total += cnt
         await query.message.reply_text(f"ℹ️ Чат: {known_chats.get(chat_id)}\n👥 Активных участников: {len(users)}\n💬 Сообщений всего: {total}")
     elif action == "today":
-        today = datetime.utcnow().strftime("%d-%m-%Y")
-        stats = message_stats.get(chat_id, {}).get(today, {})
+        chat_stats = message_stats.get(chat_id, {})
+        today_date = datetime.utcnow().date()
+        stats = {}
+        for date_str, users in chat_stats.items():
+            msg_date = datetime.strptime(date_str, "%d-%m-%Y").date()
+            if msg_date == today_date:
+                stats = users
+                break
         if not stats:
             await query.message.reply_text("Сегодня сообщений нет")
             return
@@ -116,27 +124,27 @@ async def input_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
     if step == "period":
         try:
-            start, end = text.split()
+            start_str, end_str = text.split()
         except:
             await update.message.reply_text("❌ Неверный формат")
             return
-        context.user_data["period"] = (start, end)
+        context.user_data["period"] = (start_str, end_str)
         if mode == "words_all":
-            await show_word_stats(update, chat_id, start, end)
+            await show_word_stats(update, chat_id, start_str, end_str)
             context.user_data.clear()
             return
         context.user_data["step"] = "value"
         await update.message.reply_text("Введите слово или хештег")
     elif step == "value":
-        start, end = context.user_data["period"]
+        start_str, end_str = context.user_data["period"]
         value = normalize(text)
         if mode == "words_word":
-            await show_word_stats(update, chat_id, start, end, word=value)
+            await show_word_stats(update, chat_id, start_str, end_str, word=value)
         elif mode == "words_tag":
             if not value.startswith("#"):
                 await update.message.reply_text("❌ Хештег должен начинаться с #")
                 return
-            await show_word_stats(update, chat_id, start, end, tag=value)
+            await show_word_stats(update, chat_id, start_str, end_str, tag=value)
         context.user_data.clear()
 
 async def show_word_stats(update, chat_id, start_str, end_str, word=None, tag=None):
